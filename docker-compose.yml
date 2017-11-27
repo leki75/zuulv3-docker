@@ -1,0 +1,47 @@
+---
+version: "3"
+services:
+  scheduler:
+    build: .
+    image: zuulv3
+    ports:
+      - "79"
+      - "4370"
+      - "8001"
+      - "9000"
+    volumes:
+      - "./config:/etc/zuul"
+    command: [ "/usr/local/bin/zuul-scheduler", "-d" ]
+    links:
+      - zookeeper
+
+  executor:
+    image: zuulv3
+    volumes:
+      - "./config:/etc/zuul"
+    command: [ "/usr/local/bin/zuul-executor", "-d" ]
+    links:
+      - gerrit
+      - zookeeper
+      - scheduler
+
+  gerrit:
+    image: openfrontier/gerrit
+
+  zookeeper:
+    build:
+      context: .
+      dockerfile: Dockerfile.zookeeper
+    image: zookeeper
+    ports:
+      - "2181"
+    command: 
+      - "/usr/bin/java"
+      - "-cp"
+      - "/etc/zookeeper/conf:/usr/share/java/jline.jar:/usr/share/java/log4j-1.2.jar:/usr/share/java/xercesImpl.jar:/usr/share/java/xmlParserAPIs.jar:/usr/share/java/netty.jar:/usr/share/java/slf4j-api.jar:/usr/share/java/slf4j-log4j12.jar:/usr/share/java/zookeeper.jar"
+      - "-Dcom.sun.management.jmxremote"
+      - "-Dcom.sun.management.jmxremote.local.only=false"
+      - "-Dzookeeper.log.dir=/var/log/zookeeper"
+      - "-Dzookeeper.root.logger=INFO,ROLLINGFILE"
+      - "org.apache.zookeeper.server.quorum.QuorumPeerMain"
+      - "/etc/zookeeper/conf/zoo.cfg"

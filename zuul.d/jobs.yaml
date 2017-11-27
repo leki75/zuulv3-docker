@@ -1,0 +1,931 @@
+# Shared zuul config specific to the OpenStack Project
+# Contains definitions of trusted jobs
+# Overrides jobs from:
+#    https://git.openstack.org/cgit/openstack-infra/zuul-jobs
+
+
+# Changes to this job require a special procedure, because they can
+# not be tested before landing, and if they are faulty, they will
+# break all jobs, meaning subsequent corrections will not be able to
+# land.  To make a change:
+#
+# 1) Ensure that base-test and its playbooks are identical to base.
+# 2) Make the change to base-test and/or its playbooks.
+# 3) Merge the change from step 2.  No jobs normally use base-test, so
+#    this is safe.
+# 4) Propose a change to a job to reparent it to base-test.  Choose a
+#    job which will exercise whatever you are changing.  The
+#    "unittests" job in zuul-jobs is a good choice.  Use [DNM] in the
+#    commit subject so that people know not to merge the change.  Set
+#    it to "Work in progress" so people don't review it.
+# 5) Once test results arrive for the change in step 2, make a change
+#    which copies the job and/or playbooks of base-test to base.  In
+#    the commit message, link to (without using Depends-On:) the
+#    change from step 4 so reviewers can see the test results.
+# 6) Once the change in step 5 merges, abandon the change from step 4.
+- job:
+    name: base
+    parent: null
+    description: |
+      The base job for OpenStack's installation of Zuul.
+
+      All jobs ultimately inherit from this.  It runs a pre-playbook
+      which copies all of the job's prepared git repos on to all of
+      the nodes in the nodeset.  It runs a post-playbook which copies
+      all of the files in the logs/ subdirectory of the executor
+      work directory to the logserver.
+
+      It also sets default timeout and nodeset values (which may be
+      overidden).
+    pre-run: playbooks/base/pre.yaml
+    post-run:
+      - playbooks/base/post-ssh.yaml
+      - playbooks/base/post-logs.yaml
+    roles:
+      - zuul: openstack-infra/zuul-jobs
+      - zuul: openstack-infra/openstack-zuul-jobs
+    vars:
+      ara_generate_html: failure
+    timeout: 1800
+    nodeset:
+      nodes:
+        - name: ubuntu-xenial
+          label: ubuntu-xenial
+    secrets:
+      - site_logs
+
+- job:
+    name: base-minimal
+    parent: null
+    description: |
+      A subset of what the 'base' job provides: the absolute minimum considered
+      required to run for any one job.
+      It doesn't set up cached git repositories, will not set up mirrors,
+      doesn't validate the node, etc.
+      It is meant to be used, amongst other things, to test roles and
+      playbooks that would otherwise be included by default as part of the
+      'base' job.
+      These tasks, if required, can be included by the dependant jobs
+      themselves on a need basis.
+    pre-run: playbooks/base-minimal/pre.yaml
+    post-run:
+      - playbooks/base-minimal/post-ssh.yaml
+      - playbooks/base-minimal/post-logs.yaml
+    roles:
+      - zuul: openstack-infra/zuul-jobs
+    vars:
+      ara_generate_html: failure
+    timeout: 1800
+    nodeset:
+      nodes:
+        - name: ubuntu-xenial
+          label: ubuntu-xenial
+    secrets:
+      - site_logs
+
+# See the procedure described above "base" before making changes to
+# this job.
+- job:
+    name: base-test
+    parent: null
+    description: |
+      A job to test changes to the base job without disturbing the
+      main job in production.  Not for general use.
+    pre-run: playbooks/base-test/pre.yaml
+    post-run:
+      - playbooks/base-test/post-ssh.yaml
+      - playbooks/base-test/post-logs.yaml
+    roles:
+      - zuul: openstack-infra/zuul-jobs
+      - zuul: openstack-infra/openstack-zuul-jobs
+    vars:
+      ara_generate_html: failure
+    timeout: 1800
+    nodeset:
+      nodes:
+        - name: ubuntu-xenial
+          label: ubuntu-xenial
+    secrets:
+      - site_logs
+
+- job:
+    name: publish-openstack-artifacts
+    description: |
+      Publish job to upload artifacts to tarballs.openstack.org
+    post-review: true
+    post-run: playbooks/publish/openstack-artifacts.yaml
+    secrets:
+      - secret: site_tarballs
+        name: fileserver
+
+- job:
+    name: release-openstack-puppet
+    parent: publish-openstack-artifacts
+    description: |
+      Sign and release puppet tarballs to tarballs.o.o.
+    pre-run: playbooks/puppet-tarball/pre.yaml
+    run: playbooks/puppet-tarball/run.yaml
+    post-run: playbooks/puppet-tarball/post.yaml
+    secrets:
+      - gpg_key
+
+- job:
+    name: release-openstack-python-without-pypi
+    parent: publish-openstack-artifacts
+    description: |
+      Sign and release python tarballs to tarballs.openstack.org, but
+      do not upload to PyPI.
+    pre-run: playbooks/python-tarball/pre.yaml
+    run: playbooks/python-tarball/run.yaml
+    post-run:
+      - playbooks/python-tarball/post.yaml
+    required-projects:
+      - name: openstack/requirements
+    secrets:
+      - gpg_key
+    vars:
+      # NOTE(dhellmann): Library projects using a custom installation
+      # script need to be told where the constraints file is. We can
+      # remove this when tox is no longer part of the CTI for building
+      # sdists.
+      tox_constraints_file: '{{ ansible_user_dir }}/src/git.openstack.org/openstack/requirements/upper-constraints.txt'
+
+- job:
+    name: release-openstack-python
+    parent: publish-openstack-artifacts
+    description: |
+      Release python tarballs / wheels to pypi.
+    pre-run: playbooks/python-tarball/pre.yaml
+    run: playbooks/python-tarball/run.yaml
+    post-run:
+      - playbooks/python-tarball/post.yaml
+      - playbooks/publish/pypi.yaml
+    required-projects:
+      # NOTE(dhellmann): Several projects that depend on neutron or
+      # horizon for their testing use a special install script run via
+      # tox that tries to use zuul-cloner to make the dependency
+      # available before installing it from source. All libraries
+      # require openstack/requirements for the custom install scripts
+      # they run via tox. Until we change the PTI for building sdists
+      # and wheels from Python projects so that it does not use tox,
+      # we need to ensure those repos are present for zuul-cloner to
+      # copy. The openstack/neutron, openstack/horizon, and
+      # openstack/requirements repos can be removed from the list of
+      # required-projects for this job when the job is modified to not
+      # use tox.
+      - name: openstack/neutron
+      - name: openstack/horizon
+      - name: openstack/requirements
+    secrets:
+      - secret: pypi_secret
+        name: pypi_info
+      - gpg_key
+    vars:
+      # NOTE(dhellmann): Library projects using a custom installation
+      # script need to be told where the constraints file is. We can
+      # remove this when tox is no longer part of the CTI for building
+      # sdists.
+      tox_constraints_file: '{{ ansible_user_dir }}/src/git.openstack.org/openstack/requirements/upper-constraints.txt'
+
+- job:
+    name: publish-openstack-sphinx-docs
+    description: |
+      Publish the results of the build-openstack-sphinx-docs job to
+      /afs/.openstack.org/docs/{{ zuul.project.short_name }}.
+
+      Publishes depending on branch to latest/ (for master), or the
+      basename of the branch like pike (for stable/pike).
+    final: true
+    pre-run: playbooks/python-docs/pre.yaml
+    run: playbooks/python-docs/run.yaml
+    post-run:
+      - playbooks/python-docs/post.yaml
+      - playbooks/publish/openstack-afs.yaml
+    required-projects:
+      - name: openstack/requirements
+    roles:
+      - zuul: openstack-infra/zuul-jobs
+      - zuul: openstack-infra/openstack-zuul-jobs
+    vars:
+      tox_constraints_file: '{{ ansible_user_dir }}/src/git.openstack.org/openstack/requirements/upper-constraints.txt'
+    secrets:
+      - secret: afsdocs_secret
+        name: afs
+
+- job:
+    name: publish-openstack-sphinx-docs-direct
+    description: |
+      Publish the results of the build-openstack-sphinx-docs job to
+      /afs/.openstack.org/docs/{{ zuul.project.short_name }}
+
+      Publishing is done from master branch directly without using /latest.
+    final: true
+    pre-run: playbooks/python-docs/pre.yaml
+    run: playbooks/python-docs/run.yaml
+    post-run:
+      - playbooks/python-docs/post-direct.yaml
+      - playbooks/publish/openstack-afs.yaml
+    required-projects:
+      - name: openstack/requirements
+    roles:
+      - zuul: openstack-infra/zuul-jobs
+      - zuul: openstack-infra/openstack-zuul-jobs
+    vars:
+      tox_constraints_file: "{{ ansible_user_dir }}/src/git.openstack.org/openstack/requirements/upper-constraints.txt"
+    branches:
+      - master
+    secrets:
+      - secret: afsdocs_secret
+        name: afs
+
+- job:
+    name: publish-openstack-contributor-guide
+    description: |
+      Publish contributor-guide documents to
+      https://docs.openstack.org/contributors
+    final: true
+    pre-run: playbooks/python-docs/pre.yaml
+    run: playbooks/python-docs/run.yaml
+    post-run: playbooks/publish/contributor-guide-afs.yaml
+    roles:
+      - zuul: openstack-infra/zuul-jobs
+      - zuul: openstack-infra/openstack-zuul-jobs
+    branches: master
+    secrets:
+      - secret: afsdocs_secret
+        name: afs
+
+- job:
+    name: publish-openstack-sphinx-tox-docs
+    description: |
+      Publish the results of the build-openstack-sphinx-docs job to
+      /afs/.openstack.org/docs/{{ zuul.project.short_name }}.
+
+      Publishes depending on branch to latest/ (for master), or the
+      basename of the branch like pike (for stable/pike).
+      This uses the tox "docs" environment for publishing.
+    final: true
+    pre-run: playbooks/python-docs/pre.yaml
+    run: playbooks/project-config/run-tox.yaml
+    post-run:
+      - playbooks/python-docs/post.yaml
+      - playbooks/publish/openstack-afs.yaml
+    required-projects:
+      - name: openstack/requirements
+    roles:
+      - zuul: openstack-infra/zuul-jobs
+      - zuul: openstack-infra/openstack-zuul-jobs
+    vars:
+      tox_constraints_file: '{{ ansible_user_dir }}/src/git.openstack.org/openstack/requirements/upper-constraints.txt'
+      tox_envlist: docs
+    secrets:
+      - secret: afsdocs_secret
+        name: afs
+
+- job:
+    name: publish-openstack-releasenotes
+    description: |
+      Publish the results of build-openstack-releasenotes to
+      /afs/.openstack.org/docs/releasenotes/{{ zuul.project.short_name }}
+    final: true
+    pre-run: playbooks/releasenotes/pre.yaml
+    run: playbooks/releasenotes/run.yaml
+    post-run: playbooks/publish/releasenotes.yaml
+    override-branch: master
+    required-projects:
+      - name: openstack/requirements
+    roles:
+      - zuul: openstack-infra/zuul-jobs
+      - zuul: openstack-infra/openstack-zuul-jobs
+    vars:
+      constraints_file: '{{ ansible_user_dir }}/src/git.openstack.org/openstack/requirements/upper-constraints.txt'
+    secrets:
+      - secret: afsdocs_secret
+        name: afs
+
+- job:
+    name: publish-openstack-specs
+    description: |
+      Publish OpenStack specs to static.openstack.org
+      specs/{{ zuul.project.short_name }}
+    final: true
+    pre-run: playbooks/python-docs/pre.yaml
+    run: playbooks/python-docs/run.yaml
+    post-run: playbooks/publish/openstack-specs.yaml
+    required-projects:
+      - name: openstack/requirements
+    roles:
+      - zuul: openstack-infra/zuul-jobs
+      - zuul: openstack-infra/openstack-zuul-jobs
+    vars:
+      tox_constraints_file: '{{ ansible_user_dir }}/src/git.openstack.org/openstack/requirements/upper-constraints.txt'
+    secrets:
+      - site_logs
+
+- job:
+    name: publish-openstack-specs-site
+    description: |
+      Publish OpenStack specs site to static.openstack.org specs/
+    final: true
+    pre-run: playbooks/python-docs/pre.yaml
+    run: playbooks/project-config/run-tox.yaml
+    post-run: playbooks/publish/openstack-specs-site.yaml
+    allowed-projects:
+      - openstack-infra/project-config
+    roles:
+      - zuul: openstack-infra/zuul-jobs
+      - zuul: openstack-infra/openstack-zuul-jobs
+    vars:
+      tox_envlist: specs
+    secrets:
+      - site_logs
+
+- job:
+    name: publish-openstack-sphinx-docs-infra
+    description: |
+      Publish the results of the openstack-build-sphinx-docs job to
+      /afs/.openstack.org/infra/{{ zuul.project.short_name }}
+    final: true
+    pre-run: playbooks/python-docs/pre.yaml
+    run: playbooks/python-docs/run.yaml
+    post-run:
+      - playbooks/python-docs/post-infra.yaml
+      - playbooks/publish/infra-afs.yaml
+    roles:
+      - zuul: openstack-infra/zuul-jobs
+      - zuul: openstack-infra/openstack-zuul-jobs
+    secrets:
+      - secret: afsdocs_secret
+        name: afs
+
+- job:
+    name: publish-infra-manual
+    description: |
+      Publish the Infra Manual to /afs/.openstack.org/docs/infra/manual
+    final: true
+    pre-run: playbooks/python-docs/pre.yaml
+    run: playbooks/python-docs/run.yaml
+    post-run:
+      - playbooks/python-docs/post-infra.yaml
+      - playbooks/publish/infra-manual.yaml
+    allowed-projects:
+      - openstack-infra/infra-manual
+    roles:
+      - zuul: openstack-infra/zuul-jobs
+      - zuul: openstack-infra/openstack-zuul-jobs
+    secrets:
+      - secret: afsdocs_secret
+        name: afs
+
+- job:
+    name: publish-service-types-authority
+    description: |
+      Publish OpenStack Service Types Authority to
+      https://service-types.openstack.org
+    final: true
+    pre-run: playbooks/python-docs/pre.yaml
+    run: playbooks/project-config/run-tox.yaml
+    post-run: playbooks/publish/service-types.yaml
+    allowed-projects:
+      - openstack/service-types-authority
+    roles:
+      - zuul: openstack-infra/zuul-jobs
+      - zuul: openstack-infra/openstack-zuul-jobs
+    vars:
+      tox_envlist: publish
+    secrets:
+      - site_logs
+
+- job:
+    name: publish-infra-index
+    description: |
+      Publish the infrastructure documentation index
+    final: true
+    pre-run: playbooks/python-docs/pre.yaml
+    run: playbooks/project-config/run-tox.yaml
+    post-run: playbooks/publish/infra-index.yaml
+    allowed-projects:
+      - openstack-infra/project-config
+    roles:
+      - zuul: openstack-infra/zuul-jobs
+      - zuul: openstack-infra/openstack-zuul-jobs
+    vars:
+      tox_envlist: infra-docs
+    secrets:
+      - secret: afsdocs_secret
+        name: afs
+
+- job:
+    name: publish-infra-publications-index
+    description: |
+      Publish the publication index
+    final: true
+    pre-run: playbooks/python-docs/pre.yaml
+    run: playbooks/publications-index/run.yaml
+    post-run: playbooks/publish/publications-index.yaml
+    allowed-projects:
+      - openstack-infra/publications
+    roles:
+      - zuul: openstack-infra/zuul-jobs
+      - zuul: openstack-infra/openstack-zuul-jobs
+    vars:
+      tox_envlist: infra-docs
+    secrets:
+      - secret: afsdocs_secret
+        name: afs
+
+- job:
+    name: publish-infra-publications
+    description: |
+      Publish one publication from openstack-infra/publications
+    final: true
+    pre-run: playbooks/python-docs/pre.yaml
+    run: playbooks/publications/run.yaml
+    post-run: playbooks/publish/publications.yaml
+    allowed-projects:
+      - openstack-infra/publications
+    roles:
+      - zuul: openstack-infra/zuul-jobs
+      - zuul: openstack-infra/openstack-zuul-jobs
+    vars:
+      tox_envlist: infra-docs
+    secrets:
+      - secret: afsdocs_secret
+        name: afs
+
+- job:
+    name: publish-openstack-python-branch-tarball
+    parent: publish-openstack-artifacts
+    description: |
+      Publish the results of the tox-tarball job to tarballs.openstack.org.
+    pre-run: playbooks/python-tarball/pre.yaml
+    run: playbooks/python-tarball/run.yaml
+    post-run: playbooks/python-branch-tarball/post.yaml
+    required-projects:
+      # See job release-openstack-python for details
+      - name: openstack/neutron
+      - name: openstack/horizon
+      - name: openstack/requirements
+
+- job:
+    name: publish-irc-meetings
+    description: |
+      Publish the IRC meeting calendars to eavesdrop.openstack.org.
+    final: true
+    pre-run: playbooks/yaml2ical/pre.yaml
+    run: playbooks/project-config/run-tox.yaml
+    post-run: playbooks/yaml2ical/post.yaml
+    allowed-projects:
+      - openstack-infra/irc-meetings
+    vars:
+      tox_envlist: ical
+    secrets:
+      - name: fileserver
+        secret: eavesdrop_ssh_key
+
+- job:
+    name: base-publish-static
+    description: |
+      Base job for job that publish content to static.openstack.org.
+    pre-run: playbooks/python-docs/pre.yaml
+    run: playbooks/python-docs/run.yaml
+
+- job:
+    name: publish-static
+    parent: base-publish-static
+    description: |
+      Publish content to static.openstack.org to
+      /srv/static/{{ zuul.project.short_name }}
+    final: true
+    post-run: playbooks/publish/static.yaml
+    secrets:
+      - name: fileserver
+        secret: static_ssh_key
+
+- job:
+    name: publish-governance-tc
+    parent: base-publish-static
+    description: |
+      Publish content to static.openstack.org to /srv/static/tc
+    final: true
+    post-run: playbooks/publish/static-special.yaml
+    allowed-projects:
+      - openstack/governance
+    vars:
+      static_target: tc
+    secrets:
+      - name: fileserver
+        secret: static_ssh_key
+
+- job:
+    name: publish-governance-uc
+    parent: base-publish-static
+    description: |
+      Publish content to static.openstack.org to /srv/static/uc
+    final: true
+    post-run: playbooks/publish/static-special.yaml
+    allowed-projects:
+      - openstack/governance-uc
+    vars:
+      static_target: uc
+    secrets:
+      - name: fileserver
+        secret: static_ssh_key
+
+- job:
+    name: publish-governance-website
+    parent: base-publish-static
+    description: |
+      Publish content to static.openstack.org to /srv/static/governance
+    final: true
+    post-run: playbooks/publish/static-special.yaml
+    allowed-projects:
+      - openstack/governance-website
+    vars:
+      static_target: governance
+    secrets:
+      - name: fileserver
+        secret: static_ssh_key
+
+- job:
+    name: publish-security
+    parent: base-publish-static
+    description: |
+      Publish content to static.openstack.org to /srv/static/security
+    final: true
+    post-run: playbooks/publish/static-special.yaml
+    allowed-projects:
+      - openstack/ossa
+    vars:
+      static_target: security
+    secrets:
+      - name: fileserver
+        secret: static_ssh_key
+
+- job:
+    name: publish-openstack-manuals-base
+    description: |
+      Base job to publish manual related documents. These build jobs
+      invoke a tox command and expect the published content to be in
+      publish-docs directory. This content is published on the root of
+      the website.
+
+      Note that this build job does not create a root-marker file,
+      this has to be done by scripts called from tox.
+    pre-run: playbooks/python-docs/pre.yaml
+    run: playbooks/project-config/run-tox.yaml
+    roles:
+      - zuul: openstack-infra/zuul-jobs
+      - zuul: openstack-infra/openstack-zuul-jobs
+    vars:
+      tox_envlist: publishdocs
+      tox_environment:
+        # The tox job writes the root-marker file directly and thus
+        # needs the following variables set:
+        ZUUL_PROJECT: '{{ zuul.project.name }}'
+        ZUUL_BRANCH: '{{ zuul.branch }}'
+        ZUUL_UUID: '{{ zuul.build }}'
+        ZUUL_NEWREF: '{{ zuul.ref }}'
+
+- job:
+    name: publish-openstack-manuals
+    parent: publish-openstack-manuals-base
+    final: true
+    post-run: playbooks/publish/manuals.yaml
+    allowed-projects:
+      - openstack/openstack-manuals
+      - openstack/security-doc
+      - openstack/training-guides
+    secrets:
+      - secret: afsdocs_secret
+        name: afs
+
+- job:
+    name: publish-openstack-manuals-developer
+    parent: publish-openstack-manuals-base
+    post-run: playbooks/publish/manuals.yaml
+    final: true
+    allowed-projects:
+      - openstack/api-site
+    secrets:
+      - secret: afsdeveloper_secret
+        name: afs
+
+- job:
+    name: publish-openstack-manuals-lang
+    parent: publish-openstack-manuals-base
+    post-run: playbooks/publish/manuals.yaml
+    final: true
+    allowed-projects:
+      - openstack/openstack-manuals
+      - openstack/security-doc
+    vars:
+      tox_envlist: publishlang
+    secrets:
+      - secret: afsdocs_secret
+        name: afs
+
+- job:
+    name: publish-openstack-manuals-developer-lang
+    parent: publish-openstack-manuals-base
+    post-run: playbooks/publish/manuals.yaml
+    final: true
+    allowed-projects:
+      - openstack/api-site
+    vars:
+      tox_envlist: publishlang
+    secrets:
+      - secret: afsdeveloper_secret
+        name: afs
+
+- job:
+    name: publish-api-guide
+    description: |
+      Publish api-guide document to
+      https://developer.openstack.org/api-guide.
+    pre-run: playbooks/python-docs/pre.yaml
+    run: playbooks/project-config/run-tox.yaml
+    post-run: playbooks/publish/api-guide.yaml
+    roles:
+      - zuul: openstack-infra/zuul-jobs
+      - zuul: openstack-infra/openstack-zuul-jobs
+    # We only publish the master branch, so no need to run
+    # for changes on other branches.
+    branches: master
+    vars:
+      tox_envlist: api-guide
+    secrets:
+      - secret: afsdeveloper_secret
+        name: afs
+
+- job:
+    name: publish-api-ref
+    description: |
+      Publish api-ref document to
+      https://developer.openstack.org/api-ref.
+    pre-run: playbooks/python-docs/pre.yaml
+    run: playbooks/project-config/run-tox.yaml
+    post-run: playbooks/publish/api-ref.yaml
+    roles:
+      - zuul: openstack-infra/zuul-jobs
+      - zuul: openstack-infra/openstack-zuul-jobs
+    # We only publish the master branch, so no need to run
+    # for changes on other branches.
+    branches: master
+    vars:
+      tox_envlist: api-ref
+    secrets:
+      - secret: afsdeveloper_secret
+        name: afs
+
+- job:
+    name: publish-placement-api-ref
+    description: |
+      Publish placement-api-ref document to
+      https://developer.openstack.org/api-ref/placement.
+    pre-run: playbooks/python-docs/pre.yaml
+    run: playbooks/project-config/run-tox.yaml
+    post-run: playbooks/publish/placement-api-ref.yaml
+    roles:
+      - zuul: openstack-infra/zuul-jobs
+      - zuul: openstack-infra/openstack-zuul-jobs
+    # We only publish the master branch, so no need to run
+    # for changes on other branches.
+    branches: master
+    vars:
+      tox_envlist: placement-api-ref
+    secrets:
+      - secret: afsdeveloper_secret
+        name: afs
+
+- job:
+    name: publish-install-guide
+    description: |
+      Publish install-guide document to
+      https://docs.openstack.org/project-install-guide/
+    pre-run: playbooks/python-docs/pre.yaml
+    run: playbooks/project-config/run-tox.yaml
+    post-run: playbooks/publish/install-guide.yaml
+    roles:
+      - zuul: openstack-infra/zuul-jobs
+      - zuul: openstack-infra/openstack-zuul-jobs
+    # This job runs only pre-pike, with pike the documents have been
+    # integrated into normal builds.
+    branches:
+      - stable/ocata
+    vars:
+      tox_envlist: install-guide
+    secrets:
+      - secret: afsdocs_secret
+        name: afs
+
+- job:
+    name: publish-deploy-guide
+    description: |
+      Publish deploy-guide document to
+      https://docs.openstack.org/project-deploy-guide/
+    pre-run: playbooks/python-docs/pre.yaml
+    run: playbooks/project-config/run-tox.yaml
+    post-run: playbooks/publish/deploy-guide.yaml
+    roles:
+      - zuul: openstack-infra/zuul-jobs
+      - zuul: openstack-infra/openstack-zuul-jobs
+    # We only publish the master branch, so no need to run
+    # for changes on other branches.
+    branches: master
+    vars:
+      tox_envlist: deploy-guide
+    secrets:
+      - secret: afsdocs_secret
+        name: afs
+
+- job:
+    name: release-openstack-javascript
+    parent: publish-openstack-artifacts
+    description: |
+      Release javascript tarballs to npm.
+    pre-run: playbooks/javascript/pre.yaml
+    run: playbooks/javascript/tarball.yaml
+    post-run: playbooks/javascript/post.yaml
+    secrets:
+      - npm_credentials
+      - gpg_key
+
+- job:
+    name: propose-updates
+    pre-run: playbooks/proposal/pre.yaml
+    run: playbooks/proposal/propose-updates.yaml
+    secrets:
+      - secret: proposal_ssh_key
+        name: ssh_key
+
+- job:
+    name: propose-update-constraints
+    parent: propose-updates
+    run: playbooks/proposal/propose-update-constraints.yaml
+    dependencies:
+      - release-openstack-python
+
+- job:
+    name: propose-project-config-update
+    parent: propose-updates
+    run: playbooks/proposal/propose-project-config-update.yaml
+
+- job:
+    name: build-wheel-mirror-base
+    pre-run: playbooks/wheel/pre.yaml
+    run: playbooks/wheel/build.yaml
+    post-run: playbooks/wheel/post-base.yaml
+    # 2.5 hours
+    timeout: 9000
+    # The job iterates over all branches, so we only need to run it on
+    # master.
+    branches: master
+    allowed-projects:
+      - openstack/requirements
+    roles:
+      - zuul: openstack-infra/ansible-puppet
+        name: puppet
+    required-projects:
+      - openstack-infra/system-config
+      - openstack-infra/puppet-kerberos
+      - openstack-infra/puppet-openafs
+
+- job:
+    name: build-wheel-mirror-centos-7
+    parent: build-wheel-mirror-base
+    nodeset:
+      # NOTE: The python2 and python3 suffix are important, they select the
+      # version of python to build in each job. (we pull the last character of
+      # the inventory_hostname)
+      # TODO(mordred): Replace the suffix with host_vars once we have them.
+      nodes:
+        - name: wheel-mirror-centos-7-python2
+          label: centos-7
+
+- job:
+    name: publish-wheel-mirror-centos-7
+    parent: build-wheel-mirror-centos-7
+    post-run: playbooks/publish/wheel-mirror.yaml
+    final: true
+    secrets:
+      - name: afs
+        secret: wheel_keytab
+
+- job:
+    name: build-wheel-mirror-ubuntu-trusty
+    parent: build-wheel-mirror-base
+    nodeset:
+      # NOTE: The python2 and python3 suffix are important, they select the
+      # version of python to build in each job. (we pull the last character of
+      # the inventory_hostname)
+      # TODO(mordred): Replace the suffix with host_vars once we have them.
+      nodes:
+        - name: wheel-mirror-ubuntu-trusty-python2
+          label: ubuntu-trusty
+        - name: wheel-mirror-ubuntu-trusty-python3
+          label: ubuntu-trusty
+
+- job:
+    name: publish-wheel-mirror-ubuntu-trusty
+    parent: build-wheel-mirror-ubuntu-trusty
+    post-run: playbooks/publish/wheel-mirror.yaml
+    final: true
+    secrets:
+      - name: afs
+        secret: wheel_keytab
+
+- job:
+    name: build-wheel-mirror-ubuntu-xenial
+    parent: build-wheel-mirror-base
+    nodeset:
+      # NOTE: The python2 and python3 suffix are important, they select the
+      # version of python to build in each job. (we pull the last character of
+      # the inventory_hostname)
+      # TODO(mordred): Replace the suffix with host_vars once we have them.
+      nodes:
+        - name: wheel-mirror-ubuntu-xenial-python2
+          label: ubuntu-xenial
+        - name: wheel-mirror-ubuntu-xenial-python3
+          label: ubuntu-xenial
+
+- job:
+    name: publish-wheel-mirror-ubuntu-xenial
+    parent: build-wheel-mirror-ubuntu-xenial
+    post-run: playbooks/publish/wheel-mirror.yaml
+    final: true
+    secrets:
+      - name: afs
+        secret: wheel_keytab
+
+- job:
+    name: release-wheel-mirror
+    run: playbooks/wheel/release.yaml
+    nodeset:
+      nodes: []
+    secrets:
+      - name: afs
+        secret: afsadmin_keytab
+
+- job:
+    name: tag-releases
+    pre-run: playbooks/release/pre.yaml
+    run: playbooks/release/tag.yaml
+    post-run: playbooks/release/post.yaml
+    final: true
+    secrets:
+      - name: lp_creds
+        secret: lp_creds
+      - name: ssh_key
+        secret: release_ssh_key
+      - gpg_key
+
+- job:
+    name: project-config-check-main-yaml
+    pre-run: playbooks/check-main-yaml/pre.yaml
+    run: playbooks/project-config/run-tox.yaml
+    post-run: playbooks/check-main-yaml/post.yaml
+    allowed-projects:
+      - openstack-infra/project-config
+    final: true
+    vars:
+      tox_envlist: add-projects-to-main
+    files:
+      - zuul/main.yaml
+      - gerrit/projects.yaml
+
+# Limit number of translation jobs accessing translation server since
+# Zanata has problems with too many concurrent accesses.
+- semaphore:
+    name: translations
+    max: 10
+
+- job:
+    name: upstream-translation-update
+    parent: propose-updates
+    pre-run: playbooks/translation/pre.yaml
+    run: playbooks/translation/upstream-translation-update.yaml
+    post-run: playbooks/publish/openstack-artifacts.yaml
+    semaphore: translations
+    vars:
+      fileserver_leading_path: translation-source
+      constraints_file: '{{ ansible_user_dir }}/src/git.openstack.org/openstack/requirements/upper-constraints.txt'
+    required-projects:
+      - openstack/requirements
+    secrets:
+      - secret: site_tarballs
+        name: fileserver
+      - zanata_api_credentials
+
+- job:
+    name: propose-translation-update
+    parent: propose-updates
+    pre-run: playbooks/translation/pre.yaml
+    run: playbooks/translation/propose-translation-update.yaml
+    vars:
+      constraints_file: '{{ ansible_user_dir }}/src/git.openstack.org/openstack/requirements/upper-constraints.txt'
+    semaphore: translations
+    required-projects:
+      - openstack/requirements
+    secrets:
+      - zanata_api_credentials

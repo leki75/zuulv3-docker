@@ -1,0 +1,9 @@
+FROM debian:9
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends zookeeperd && \
+    rm -rf /var/lib/apt/lists/*
+
+EXPOSE 2818
+
+CMD /bin/bash

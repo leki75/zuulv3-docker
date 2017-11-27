@@ -1,0 +1,8 @@
+- tenant:
+    name: releng
+    source:
+      github:
+        config-projects:
+          - leki75/zuulv3-docker
+        untrusted-projects:
+          - leki75/zuul-jobs
